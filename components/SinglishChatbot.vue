@@ -110,8 +110,10 @@
 
 <script setup>
 import { ref, nextTick, onMounted } from 'vue'
-import { extract } from 'fuzzball'
-import { chatbotIntents } from '~/data/chatbotIntents.js'
+
+// API Configuration
+const ML_SERVICE_URL = 'http://localhost:8001'
+const ML_API_KEY = 'development'
 
 // Reactive state
 const isOpen = ref(false)
@@ -122,14 +124,20 @@ const hasInteracted = ref(false)
 const unreadCount = ref(0)
 const messagesContainer = ref(null)
 const messageInput = ref(null)
+const sessionId = ref(null)
 
 // Welcome message
 onMounted(() => {
+  // Generate a session ID for this chat session
+  sessionId.value = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  
   messages.value.push({
     id: Date.now(),
     type: 'bot',
     text: 'Ayubowan! Mama CoverageBot. Singlish walata reply karanna puluwan! Try "kohomada" kiyla! 😊',
-    timestamp: new Date()
+    timestamp: new Date(),
+    intent: 'welcome',
+    confidence: 1.0
   })
 })
 
@@ -168,7 +176,7 @@ const sendMessage = async () => {
   }
 
   messages.value.push(userMessage)
-  const userInput = currentMessage.value.trim().toLowerCase()
+  const userInput = currentMessage.value.trim()
   currentMessage.value = ''
 
   await nextTick()
@@ -177,70 +185,109 @@ const sendMessage = async () => {
   // Show typing indicator
   isTyping.value = true
   
-  // Simulate typing delay
-  setTimeout(() => {
-    const botResponse = getBotResponse(userInput)
+  try {
+    // Call ML service for intelligent response
+    const botResponse = await getMLResponse(userInput)
     
     messages.value.push({
       id: Date.now() + 1,
       type: 'bot',
-      text: botResponse,
-      timestamp: new Date()
+      text: botResponse.response,
+      timestamp: new Date(),
+      intent: botResponse.intent,
+      confidence: botResponse.confidence,
+      processingTime: botResponse.processing_time,
+      strategy: botResponse.metadata?.strategy
     })
 
-    isTyping.value = false
+  } catch (error) {
+    console.error('ML Service error:', error)
     
-    // If chat is closed, increment unread count
-    if (!isOpen.value) {
-      unreadCount.value++
-    }
-
-    nextTick(() => {
-      scrollToBottom()
-    })
-  }, 1000 + Math.random() * 1000) // Random delay between 1-2 seconds
-}
-
-const getBotResponse = (userInput) => {
-  const allPhrases = []
-  
-  // Create a flat array of all phrases with their intent info
-  chatbotIntents.forEach(intent => {
-    intent.phrases.forEach(phrase => {
-      allPhrases.push({
-        phrase: phrase.toLowerCase(),
-        intent: intent.intent,
-        response: intent.response
-      })
-    })
-  })
-
-  // Use fuzzball to find the best matches
-  const matches = extract(userInput, allPhrases.map(p => p.phrase), {
-    scorer: 'ratio',
-    processor: 'default',
-    limit: 5,
-    cutoff: 60 // Minimum similarity threshold
-  })
-
-  if (matches.length > 0) {
-    // Find the corresponding response for the best match
-    const bestMatch = matches[0]
-    const matchedPhrase = allPhrases.find(p => p.phrase === bestMatch[0])
+    // Fallback to simple rule-based response if ML service fails
+    const fallbackResponse = getFallbackResponse(userInput)
     
-    if (matchedPhrase) {
-      return matchedPhrase.response
-    }
+    messages.value.push({
+      id: Date.now() + 1,
+      type: 'bot',
+      text: fallbackResponse,
+      timestamp: new Date(),
+      intent: 'fallback',
+      confidence: 0.5,
+      strategy: 'fallback'
+    })
   }
 
-  // Default responses for unmatched input
-  const defaultResponses = [
-    "Mata eka therenne naha machan! Try 'kohomada' or 'oyage nama mokakda' kiyla! 🤔",
-    "Hmm, mata eka understand karanna baha. Simple Singlish walata try karanna! 😅",
-    "Aiyo, mata confused! 'Help' kiyla mata kiyanna puluwan de mokakda karanne! 🤷‍♂️",
-    "Eka mata clear naha machan. Try 'hello' or 'thanks' wage simple words! 💭"
-  ]
+  isTyping.value = false
+  
+  // If chat is closed, increment unread count
+  if (!isOpen.value) {
+    unreadCount.value++
+  }
 
+  nextTick(() => {
+    scrollToBottom()
+  })
+}
+
+const getMLResponse = async (userInput) => {
+  try {
+    const response = await fetch(`${ML_SERVICE_URL}/predict`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${ML_API_KEY}`
+      },
+      body: JSON.stringify({
+        message: userInput,
+        session_id: sessionId.value,
+        context: {
+          previous_messages: messages.value.slice(-5), // Send last 5 messages for context
+          user_preferences: {},
+          timestamp: new Date().toISOString()
+        }
+      })
+    })
+
+    if (!response.ok) {
+      throw new Error(`ML Service responded with status: ${response.status}`)
+    }
+
+    const data = await response.json()
+    return data
+
+  } catch (error) {
+    console.error('Error calling ML service:', error)
+    throw error
+  }
+}
+
+const getFallbackResponse = (userInput) => {
+  const input = userInput.toLowerCase()
+  
+  // Simple fallback responses based on keywords
+  if (input.includes('kohomada') || input.includes('hello') || input.includes('hi')) {
+    return "Hari honda machan! Oya kohomada? 😊"
+  }
+  
+  if (input.includes('nama') || input.includes('name')) {
+    return "Mama CoverageBot! AI-powered Singlish assistant kenek. What about you? 🤖"
+  }
+  
+  if (input.includes('thanks') || input.includes('stuti')) {
+    return "Mokakwath naha machan! Mata help karanna lassana! 😊"
+  }
+  
+  if (input.includes('bye') || input.includes('giya')) {
+    return "Bye bye machan! Mata aye pennako! See you soon! 👋"
+  }
+  
+  // Default fallback
+  const defaultResponses = [
+    "Mata eka therenne naha machan! Try 'kohomada' or 'help' kiyla! 🤔",
+    "Hmm, mata eka understand karanna baha. Simple Singlish walata try karanna! 😅",
+    "Aiyo, mata confused! Can you say that again in simpler words? 🤷‍♂️"
+  ]
+  
   return defaultResponses[Math.floor(Math.random() * defaultResponses.length)]
 }
 
